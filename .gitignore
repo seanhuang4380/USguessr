@@ -216,3 +216,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# project
+aug_testing
+global
+US
+balance_select.py
+check.py
+fetch_streetview.py
+notes
+state_balancing
+*.png
+*.jpg
+USguessr_functions.py
+USguessr_training.py
+USguessr_validation.py
+cache
