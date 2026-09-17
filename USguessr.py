@@ -1,6 +1,5 @@
 #TODO
 # split train/test
-# loading model
 
 import torch
 import torch.nn as nn
@@ -12,12 +11,14 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 import time
+import copy
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LR = 0.001
 EPOCHS = 10
 DATA_DIR = "US/data"
+BATCH_SIZE = 32
 data_dir = Path(DATA_DIR)
 
 def get_dataset_info(dataset):
@@ -44,11 +45,13 @@ train_transform = v2.Compose([
 ])
 
 train_dataset = datasets.ImageFolder(data_dir / 'train', transform=train_transform)
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=32, shuffle=True)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
 
 def train_one_epoch(model, train_loader, criterion, optimizer):
     model.train()
+    running_loss = 0
+    total = 0
 
     for images, labels in train_loader:
         images, labels = images.to(DEVICE), labels.to(DEVICE)
@@ -58,6 +61,11 @@ def train_one_epoch(model, train_loader, criterion, optimizer):
         loss.backward()
         optimizer.step()
 
+        batch_size = labels.size(0)
+        running_loss += loss.item() * batch_size
+        total += batch_size
+
+    return running_loss / total
 #------------------------------------------validation---------------------------------------------
 
 val_transform = v2.Compose([
@@ -69,8 +77,8 @@ v2.Normalize(
 )
 ])
 
-val_dataset = datasets.ImageFolder(data_dir / 'test', transform=val_transform)
-val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=32, shuffle=False)
+val_dataset = datasets.ImageFolder(data_dir / 'validation', transform=val_transform)
+val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
 def validate(model, val_loader, criterion):
     model.eval()
@@ -83,7 +91,7 @@ def validate(model, val_loader, criterion):
             images, labels = images.to(DEVICE), labels.to(DEVICE)
             outputs = model(images)
             loss = criterion(outputs, labels)
-            val_loss += loss.item()
+            val_loss += loss.item() * BATCH_SIZE
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
@@ -91,8 +99,15 @@ def validate(model, val_loader, criterion):
     accuracy = 100 * correct / total
     return val_loss / len(val_loader), accuracy
 
+class InvalidFileTypeException(Exception):
+    """Exception raised when a file type is not supported."""
+    def __init__(self, message="The provided file type is invalid."):
+        self.message = message
+        super().__init__(self.message)
+
 
 class DuplicateFileException(Exception):
+    """Exception raised when a model state already exists"""
     def __init__(self, file_name: str) -> None:
         self.message = f"File: {file_name} already exists"
         super().__init__(self.message)
@@ -100,40 +115,53 @@ class DuplicateFileException(Exception):
 
 def main():
     #-----------------------------------userinput---------------------------------
+    for folder in ["saves", "checkpoints"]:
+        Path(folder).mkdir(exist_ok=True)
+
+    # model can either be empty, pt, or ckpt file
+    model_to_load = input("Enter model to load") 
+    if model_to_load and not model_to_load.endswith((".pt", ".ckpt")):
+        raise InvalidFileTypeException() 
 
     while (version_name := input("What name do you want to save this model as?")) == "":
         print("Name cannot be empty")
 
     # disallow overwriting models 
-    check_folders = [Path("versions"), Path("in_progress")]
-    prefix = Path(version_name).stem
+    check_folders = [Path("saves"), Path("checkpoints")]
+    version_name = Path(version_name).stem # normalize version_name to the prefix
+
     for folder in check_folders:
         for f in folder.iterdir():
-            if (f.name.startswith(prefix) and f.suffix == ".pth"): 
+            if (f.name.startswith(version_name) and (f.suffix == ".pt" or f.suffix == ".ckpt")): 
                 raise DuplicateFileException(version_name)
 
-    while (epochs := input("Number of epochs")) == "":
-        print("Invalid number")
-    epochs = int(epochs)
-
-    # -----------------------------------------load model------------------------
+    #-------------------------------------dataset info-----------------------------------
 
     print("Training Dataset Info: ")
     get_dataset_info(train_dataset)
     print("Validation Dataset Info: ")
     get_dataset_info(val_dataset)
 
+    # -----------------------------------------load model------------------------
+
     model = models.resnet50(weights = models.ResNet50_Weights.DEFAULT)
 
     num_features = model.fc.in_features
+    for param in model.parameters(): # freeze before adding FC layer
+        param.requires_grad = False
+
     model.fc = nn.Linear(num_features, len(train_dataset.classes))
     model = model.to(DEVICE)
 
-    for param in model.parameters():
-        param.requires_grad = False
-
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.fc.parameters(), lr=LR)
+
+    if model_to_load:
+        checkpoint = torch.load(model_to_load, weights_only=True)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        if ('optimizer_state_dict' in checkpoint):
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
 
     #------------------------------------training/validation-----------------------------
 
@@ -142,25 +170,28 @@ def main():
 
     start_time = time.time()
     for epoch in range(EPOCHS):
-        train_one_epoch(model, train_loader, criterion, optimizer)
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer)
         val_loss, val_acc = validate(model, val_loader, criterion)
 
         print(
             f"Epoch {epoch+1}: "
-            f"Validation Accuracy = {val_acc:.2f}%"
+            f"Train loss: {train_loss:.4f}"
+            f"Validation Loss: {val_loss:.4f}%"
+            f"Validation Accuracy: {val_acc:.4f}%"
         )
         
-        checkpoint_path = Path("in_progress") / Path(f"{version_name}_epoch_{epoch}.ckpt") 
+        checkpoint_path = Path("checkpoints") / Path(f"{version_name}_epoch_{epoch + 1}.ckpt") 
         checkpoint = {
-            'epoch': epoch,
+            'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'loss':val_loss, 
-            'accuracy': val_acc
+            'val_loss':val_loss, 
+            'val_accuracy': val_acc
         }
         torch.save(checkpoint, checkpoint_path) # save checkpoint each epoch
         if (val_acc > best_accuracy):
-            best_model = model.state_dict()
+            best_model = copy.deepcopy(model.state_dict())
+            best_accuracy = val_acc
 
         print(f"Checkpoint saved to {checkpoint_path}.")
 
@@ -176,6 +207,10 @@ def main():
     }
     torch.save(save, opath) # save model to saves 
     print(f"Model saved to {opath}") 
+
+
+
+
 
 if __name__ == "__main__":
     main()
