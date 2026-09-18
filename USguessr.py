@@ -1,12 +1,13 @@
 #TODO
-# split train/test
+# epochs from checkpoint doesn't work
 
 import torch
+torch.backends.cudnn.enabled = False # disables miopen, which batchnorm2d, and subsequently, resnet, uses during forward pass
+                                        # crashes otherwise
 import torch.nn as nn
 import torch.optim as optim
 from torchvision.transforms import v2
 from torchvision import models, datasets
-import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 from PIL import Image
@@ -16,10 +17,11 @@ import copy
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LR = 0.001
-EPOCHS = 10
+EPOCHS = 10 # ending epoch
 DATA_DIR = "US/data"
 BATCH_SIZE = 32
 data_dir = Path(DATA_DIR)
+start_epoch = 0 # may change if a ckpt is loaded
 
 def get_dataset_info(dataset):
     print(f"Number of classes: {len(dataset.classes)}")
@@ -37,7 +39,8 @@ def get_dataset_info(dataset):
 
 train_transform = v2.Compose([
     v2.Resize((224, 224)),
-    v2.ToTensor(),
+    v2.ToImage(),
+    v2.ToDtype(torch.float32, scale=True),
     v2.Normalize(
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]
@@ -70,7 +73,8 @@ def train_one_epoch(model, train_loader, criterion, optimizer):
 
 val_transform = v2.Compose([
 v2.Resize((224, 224)),
-v2.ToTensor(),
+v2.ToImage(),
+v2.ToDtype(torch.float32, scale=True),
 v2.Normalize(
     mean=[0.485, 0.456, 0.406],
     std=[0.229, 0.224, 0.225]
@@ -79,6 +83,7 @@ v2.Normalize(
 
 val_dataset = datasets.ImageFolder(data_dir / 'validation', transform=val_transform)
 val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+assert train_dataset.class_to_idx == val_dataset.class_to_idx
 
 def validate(model, val_loader, criterion):
     model.eval()
@@ -91,13 +96,15 @@ def validate(model, val_loader, criterion):
             images, labels = images.to(DEVICE), labels.to(DEVICE)
             outputs = model(images)
             loss = criterion(outputs, labels)
-            val_loss += loss.item() * BATCH_SIZE
+
+            val_loss += loss.item() * labels.size(0) 
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
 
     accuracy = 100 * correct / total
-    return val_loss / len(val_loader), accuracy
+    val_loss = val_loss / total 
+    return val_loss, accuracy
 
 class InvalidFileTypeException(Exception):
     """Exception raised when a file type is not supported."""
@@ -114,6 +121,7 @@ class DuplicateFileException(Exception):
 
 
 def main():
+    print(DEVICE)
     #-----------------------------------userinput---------------------------------
     for folder in ["saves", "checkpoints"]:
         Path(folder).mkdir(exist_ok=True)
@@ -123,7 +131,7 @@ def main():
     if model_to_load and not model_to_load.endswith((".pt", ".ckpt")):
         raise InvalidFileTypeException() 
 
-    while (version_name := input("What name do you want to save this model as?")) == "":
+    while (version_name := input("What name do you want to save this model as? ")) == "":
         print("Name cannot be empty")
 
     # disallow overwriting models 
@@ -137,10 +145,10 @@ def main():
 
     #-------------------------------------dataset info-----------------------------------
 
-    print("Training Dataset Info: ")
-    get_dataset_info(train_dataset)
-    print("Validation Dataset Info: ")
-    get_dataset_info(val_dataset)
+    # print("Training Dataset Info: ")
+    # get_dataset_info(train_dataset)
+    # print("Validation Dataset Info: ")
+    # get_dataset_info(val_dataset)
 
     # -----------------------------------------load model------------------------
 
@@ -156,28 +164,31 @@ def main():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.fc.parameters(), lr=LR)
 
-    if model_to_load:
-        checkpoint = torch.load(model_to_load, weights_only=True)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        if ('optimizer_state_dict' in checkpoint):
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-
-    #------------------------------------training/validation-----------------------------
 
     best_model = None
     best_accuracy = 0.0
+    if model_to_load: # resume training with last accuracy and last epoch loaded
+        checkpoint = torch.load(model_to_load, weights_only=True)
+        model.load_state_dict(checkpoint['model_state_dict'])
+
+        if ('optimizer_state_dict' in checkpoint):
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch']
+            best_accuracy = checkpoint['val_accuracy']
+            best_model = copy.deepcopy(model.state_dict())
+
+    #------------------------------------training/validation-----------------------------
 
     start_time = time.time()
-    for epoch in range(EPOCHS):
+    for epoch in range(start_epoch, EPOCHS):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer)
         val_loss, val_acc = validate(model, val_loader, criterion)
 
         print(
             f"Epoch {epoch+1}: "
-            f"Train loss: {train_loss:.4f}"
-            f"Validation Loss: {val_loss:.4f}%"
-            f"Validation Accuracy: {val_acc:.4f}%"
+            f"Train loss: {train_loss:.4f}\n"
+            f"Validation Loss: {val_loss:.4f}\n"
+            f"Validation Accuracy: {val_acc:.4f}%\n"
         )
         
         checkpoint_path = Path("checkpoints") / Path(f"{version_name}_epoch_{epoch + 1}.ckpt") 
@@ -189,7 +200,7 @@ def main():
             'val_accuracy': val_acc
         }
         torch.save(checkpoint, checkpoint_path) # save checkpoint each epoch
-        if (val_acc > best_accuracy):
+        if (val_acc > best_accuracy) or best_model is None:
             best_model = copy.deepcopy(model.state_dict())
             best_accuracy = val_acc
 
