@@ -232,3 +232,6 @@ USguessr_functions.py
 USguessr_training.py
 USguessr_validation.py
 cache
+split_states.py
+split_info
+

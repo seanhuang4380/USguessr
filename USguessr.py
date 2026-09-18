@@ -1,6 +1,3 @@
-#TODO
-# epochs from checkpoint doesn't work
-
 import torch
 torch.backends.cudnn.enabled = False # disables miopen, which batchnorm2d, and subsequently, resnet, uses during forward pass
                                         # crashes otherwise
@@ -17,11 +14,11 @@ import copy
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LR = 0.001
-EPOCHS = 10 # ending epoch
+END_EPOCH = 10
 DATA_DIR = "US/data"
 BATCH_SIZE = 32
 data_dir = Path(DATA_DIR)
-start_epoch = 0 # may change if a ckpt is loaded
+start_epoch = 0 # may change if .ckpt is loaded
 
 def get_dataset_info(dataset):
     print(f"Number of classes: {len(dataset.classes)}")
@@ -40,6 +37,11 @@ def get_dataset_info(dataset):
 train_transform = v2.Compose([
     v2.Resize((224, 224)),
     v2.ToImage(),
+    v2.RandomResizedCrop(
+        (224, 224),
+        scale=(0.8, 1.0)
+    ),
+    v2.RandomHorizontalFlip(p=0.5),
     v2.ToDtype(torch.float32, scale=True),
     v2.Normalize(
         mean=[0.485, 0.456, 0.406],
@@ -72,13 +74,13 @@ def train_one_epoch(model, train_loader, criterion, optimizer):
 #------------------------------------------validation---------------------------------------------
 
 val_transform = v2.Compose([
-v2.Resize((224, 224)),
-v2.ToImage(),
-v2.ToDtype(torch.float32, scale=True),
-v2.Normalize(
-    mean=[0.485, 0.456, 0.406],
-    std=[0.229, 0.224, 0.225]
-)
+    v2.Resize((224, 224)),
+    v2.ToImage(),
+    v2.ToDtype(torch.float32, scale=True),
+    v2.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
 ])
 
 val_dataset = datasets.ImageFolder(data_dir / 'validation', transform=val_transform)
@@ -158,16 +160,30 @@ def main():
     for param in model.parameters(): # freeze before adding FC layer
         param.requires_grad = False
 
+    for param in model.layer4.parameters():
+        param.requires_grad = True
+
     model.fc = nn.Linear(num_features, len(train_dataset.classes))
     model = model.to(DEVICE)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.fc.parameters(), lr=LR)
+
+    optimizer = optim.Adam([
+        {'params': model.fc.parameters(), 'lr':LR},
+        {'params': model.layer4.parameters(), 'lr':0.0001}
+    ]) 
 
 
+    # default values
     best_model = None
     best_accuracy = 0.0
-    if model_to_load: # resume training with last accuracy and last epoch loaded
+    start_epoch = 0
+    best_epoch = None
+    best_train_loss = None
+    best_val_loss = None
+
+    # loaded values
+    if model_to_load: 
         checkpoint = torch.load(model_to_load, weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
 
@@ -180,7 +196,7 @@ def main():
     #------------------------------------training/validation-----------------------------
 
     start_time = time.time()
-    for epoch in range(start_epoch, EPOCHS):
+    for epoch in range(start_epoch, END_EPOCH):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer)
         val_loss, val_acc = validate(model, val_loader, criterion)
 
@@ -203,13 +219,17 @@ def main():
         if (val_acc > best_accuracy) or best_model is None:
             best_model = copy.deepcopy(model.state_dict())
             best_accuracy = val_acc
+            best_epoch = epoch + 1
+            best_train_loss = train_loss
+            best_val_loss = val_loss
 
-        print(f"Checkpoint saved to {checkpoint_path}.")
+        print(f"Checkpoint saved to {checkpoint_path}.\n")
 
 
     # save the model with best accuracy
     end_time = time.time()
-    print(f"Total Training Time: {end_time - start_time:.2f} seconds")
+    total_time = end_time - start_time
+    print(f"Total Training Time: {total_time:.2f} seconds")
 
     opath = Path("saves") / Path(f"{version_name}.pt") 
     save = {
@@ -217,10 +237,14 @@ def main():
         'accuracy': best_accuracy 
     }
     torch.save(save, opath) # save model to saves 
-    print(f"Model saved to {opath}") 
+    print(f"Model saved to {opath}\n") 
 
 
+    print(f"Best Model stats: Name, Epochs, Best Epoch, Train Loss, Val Loss, Val Acc, Minutes\n")
+    print(f"{version_name} {END_EPOCH} {best_epoch} {best_train_loss} {best_val_loss} {best_accuracy} {total_time/60:.2f}")
 
+    with open("stats.txt", mode="a") as f:
+        f.write(f"{version_name} {END_EPOCH} {best_epoch} {best_train_loss:.4f} {best_val_loss:.4f} {best_accuracy:.4f} {total_time/60:.2f}\n")
 
 
 if __name__ == "__main__":
