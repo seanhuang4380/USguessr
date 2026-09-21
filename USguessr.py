@@ -10,6 +10,7 @@ from pathlib import Path
 from PIL import Image
 import time
 import copy
+from matplotlib import pyplot as plt
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -108,6 +109,49 @@ def validate(model, val_loader, criterion):
     val_loss = val_loss / total 
     return val_loss, accuracy
 
+def confusion_matrix(model, val_loader, num_classes):
+    model.eval()
+
+    cm = np.zeros((num_classes, num_classes), dtype = int)
+
+    with torch.no_grad():
+        for images, labels in val_loader():
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
+
+            outputs = model(images)
+            _, predicted = outputs.max(1)
+            for actual, pred in zip(labels, predicted):
+                cm[actual.item(), pred.item()] += 1 
+
+    return cm
+
+
+def plot_cm(cm, class_names):
+    fig, ax = plt.subplots(figsize = (16,16))
+
+    ax.imshow(cm)
+
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
+    ax.set_title("Confusion Matrix")
+
+    ax.set_xticks(range(len(class_names)))
+    ax.set_yticks(range(len(class_names)))
+
+    ax.set_xticklabels(class_names, rotation = 90)
+    ax.set_yticklabels(class_names)
+
+
+def print_state_acc(cm, class_names):
+    for i, class_name in enumerate(class_names):
+        correct = cm[i,i]
+        total = cm[i].sum()
+
+        accuracy = 100 * correct / total
+        print(f"{class_name}: {accuracy:.2f}%")
+
+
 class InvalidFileTypeException(Exception):
     """Exception raised when a file type is not supported."""
     def __init__(self, message="The provided file type is invalid."):
@@ -200,6 +244,10 @@ def main():
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer)
         val_loss, val_acc = validate(model, val_loader, criterion)
 
+        cm = confusion_matrix(model ,val_loader, len(val_dataset.classes))
+        plot_cm(cm, val_dataset.classes)
+        print(print_state_acc(cm, len(val_dataset.classes)))
+        
         print(
             f"Epoch {epoch+1}: "
             f"Train loss: {train_loss:.4f}\n"
