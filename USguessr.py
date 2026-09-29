@@ -15,7 +15,7 @@ from matplotlib import pyplot as plt
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LR = 0.001
-END_EPOCH = 10
+END_EPOCH = 15 
 DATA_DIR = "US/data"
 BATCH_SIZE = 32
 data_dir = Path(DATA_DIR)
@@ -43,6 +43,12 @@ train_transform = v2.Compose([
         scale=(0.8, 1.0)
     ),
     v2.RandomHorizontalFlip(p=0.5),
+    #  v2.ColorJitter(
+    #     brightness=0.2,
+    #     contrast=0.2,
+    #     saturation=0.2,
+    #     hue=0.05
+    # ),
     v2.ToDtype(torch.float32, scale=True),
     v2.Normalize(
         mean=[0.485, 0.456, 0.406],
@@ -93,6 +99,7 @@ def validate(model, val_loader, criterion):
     correct = 0
     total = 0
     val_loss = 0
+    top5_correct_count = 0
 
     with torch.no_grad():
         for images, labels in val_loader:
@@ -101,13 +108,23 @@ def validate(model, val_loader, criterion):
             loss = criterion(outputs, labels)
 
             val_loss += loss.item() * labels.size(0) 
+
+            # top 1
             _, predicted = outputs.max(1)
+
+            # top 5
+            top5 = outputs.topk(5, dim=1).indices
+            top5_correct = top5.eq(labels.unsqueeze(1)).any(dim=1)
+
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
+            top5_correct_count += top5_correct.sum().item()
 
     accuracy = 100 * correct / total
+    top5_accuracy = 100 * top5_correct_count/total
     val_loss = val_loss / total 
-    return val_loss, accuracy
+
+    return val_loss, accuracy, top5_accuracy 
 
 def confusion_matrix(model, val_loader, num_classes):
     model.eval()
@@ -115,7 +132,7 @@ def confusion_matrix(model, val_loader, num_classes):
     cm = np.zeros((num_classes, num_classes), dtype = int)
 
     with torch.no_grad():
-        for images, labels in val_loader():
+        for images, labels in val_loader:
             images = images.to(DEVICE)
             labels = labels.to(DEVICE)
 
@@ -141,6 +158,20 @@ def plot_cm(cm, class_names):
 
     ax.set_xticklabels(class_names, rotation = 90)
     ax.set_yticklabels(class_names)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def print_prediction_distribution(cm, class_names):
+
+    predicted_counts = cm.sum(axis=0)
+
+    for i, class_name in enumerate(class_names):
+        print(
+            f"{class_name}: "
+            f"{predicted_counts[i]} predictions"
+        )
 
 
 def print_state_acc(cm, class_names):
@@ -173,30 +204,37 @@ def main():
         Path(folder).mkdir(exist_ok=True)
 
     # model can either be empty, pt, or ckpt file
-    model_to_load = input("Enter model to load") 
+    model_to_load = input("Enter model to load: ") 
     if model_to_load and not model_to_load.endswith((".pt", ".ckpt")):
         raise InvalidFileTypeException() 
 
     while (version_name := input("What name do you want to save this model as? ")) == "":
-        print("Name cannot be empty")
+        print("Name cannot be empty.")
 
     # disallow overwriting models 
     check_folders = [Path("saves"), Path("checkpoints")]
     version_name = Path(version_name).stem # normalize version_name to the prefix
 
+    exists  = False
     for folder in check_folders:
         for f in folder.iterdir():
             if (f.name.startswith(version_name) and (f.suffix == ".pt" or f.suffix == ".ckpt")): 
-                raise DuplicateFileException(version_name)
+                exists = True
+                break
 
-    #-------------------------------------dataset info-----------------------------------
+    if (exists):
+        check = input("This save already exists. Override it? (y/n): ")
+        if (check.lower() != "y"):
+            raise DuplicateFileException(version_name)
+
+    #dataset info
 
     # print("Training Dataset Info: ")
     # get_dataset_info(train_dataset)
     # print("Validation Dataset Info: ")
     # get_dataset_info(val_dataset)
 
-    # -----------------------------------------load model------------------------
+    #load model
 
     model = models.resnet50(weights = models.ResNet50_Weights.DEFAULT)
 
@@ -207,7 +245,10 @@ def main():
     for param in model.layer4.parameters():
         param.requires_grad = True
 
-    model.fc = nn.Linear(num_features, len(train_dataset.classes))
+    model.fc = nn.Sequential(
+        nn.Dropout(p=0.5), 
+        nn.Linear(num_features, len(train_dataset.classes))
+        )
     model = model.to(DEVICE)
 
     criterion = nn.CrossEntropyLoss()
@@ -221,6 +262,7 @@ def main():
     # default values
     best_model = None
     best_accuracy = 0.0
+    best_top5_acc = 0.0
     start_epoch = 0
     best_epoch = None
     best_train_loss = None
@@ -237,22 +279,26 @@ def main():
             best_accuracy = checkpoint['val_accuracy']
             best_model = copy.deepcopy(model.state_dict())
 
-    #------------------------------------training/validation-----------------------------
+    #training/validation
 
     start_time = time.time()
     for epoch in range(start_epoch, END_EPOCH):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer)
-        val_loss, val_acc = validate(model, val_loader, criterion)
+        val_loss, val_acc, val_top5_acc = validate(model, val_loader, criterion)
 
-        cm = confusion_matrix(model ,val_loader, len(val_dataset.classes))
-        plot_cm(cm, val_dataset.classes)
-        print(print_state_acc(cm, len(val_dataset.classes)))
+        # confusion matrix and state accuracy
+        # cm = confusion_matrix(model ,val_loader, len(val_dataset.classes))
+        # cm_normalized = cm.astype(float) / cm.sum(axis=1, keepdims = True)
+        # print_state_acc(cm_normalized, val_dataset.classes)
+        # print_prediction_distribution(cm, val_dataset.classes)
+        # plot_cm(cm_normalized, val_dataset.classes)
         
         print(
             f"Epoch {epoch+1}: "
             f"Train loss: {train_loss:.4f}\n"
             f"Validation Loss: {val_loss:.4f}\n"
-            f"Validation Accuracy: {val_acc:.4f}%\n"
+            f"Top 1 Accuracy: {val_acc:.4f}%\n"
+            f"Top-5 Accuracy: {val_top5_acc:.2f}%"
         )
         
         checkpoint_path = Path("checkpoints") / Path(f"{version_name}_epoch_{epoch + 1}.ckpt") 
@@ -261,8 +307,10 @@ def main():
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'val_loss':val_loss, 
-            'val_accuracy': val_acc
+            'val_accuracy': val_acc,
+            'val_top5_acc': val_top5_acc
         }
+
         torch.save(checkpoint, checkpoint_path) # save checkpoint each epoch
         if (val_acc > best_accuracy) or best_model is None:
             best_model = copy.deepcopy(model.state_dict())
@@ -270,8 +318,9 @@ def main():
             best_epoch = epoch + 1
             best_train_loss = train_loss
             best_val_loss = val_loss
+            best_top5_acc = val_top5_acc
 
-        print(f"Checkpoint saved to {checkpoint_path}.\n")
+        print(f"Checkpoint saved as {checkpoint_path}.\n")
 
 
     # save the model with best accuracy
@@ -284,12 +333,12 @@ def main():
         'model_state_dict': best_model,
         'accuracy': best_accuracy 
     }
-    torch.save(save, opath) # save model to saves 
-    print(f"Model saved to {opath}\n") 
+    torch.save(save, opath)
+    print(f"Model saved as {opath}\n") 
 
 
-    print(f"Best Model stats: Name, Epochs, Best Epoch, Train Loss, Val Loss, Val Acc, Minutes\n")
-    print(f"{version_name} {END_EPOCH} {best_epoch} {best_train_loss} {best_val_loss} {best_accuracy} {total_time/60:.2f}")
+    print(f"Best Model stats: Name, Epochs, Best Epoch, Train Loss, Val Loss, Top 1 Acc, Top 5 Acc, Minutes\n")
+    print(f"{version_name} {END_EPOCH} {best_epoch} {best_train_loss} {best_val_loss} {best_accuracy} {best_top5_acc} {total_time/60:.2f}")
 
     with open("stats.txt", mode="a") as f:
         f.write(f"{version_name} {END_EPOCH} {best_epoch} {best_train_loss:.4f} {best_val_loss:.4f} {best_accuracy:.4f} {total_time/60:.2f}\n")
