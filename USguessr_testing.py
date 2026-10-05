@@ -4,7 +4,7 @@ from torchvision import datasets
 import torch
 import torch.nn as nn
 from torchvision import models
-import USguessr as usg
+import USguessr_training as usg
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -48,7 +48,6 @@ def main():
     val_loss, top1_acc, top5_acc = usg.validate(model, test_loader, criterion)
 
     print(
-            f"Validation Loss: {val_loss:.4f}\n"
             f"Top 1 Accuracy: {top1_acc:.4f}%\n"
             f"Top-5 Accuracy: {top5_acc:.2f}%"
         )
